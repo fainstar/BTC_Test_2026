@@ -21,11 +21,19 @@ import pandas as pd
 from pathlib import Path
 import time
 
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn, MofNCompleteColumn
+from rich import box
+
+console = Console()
+
 # ─── 參數 ───────────────────────────────────────────────────────────────────
-INPUT_FILE     = "btc_5m_no_outliers.csv"
-OUTPUT_FILE    = "btc_5m_rocket_features.parquet"
-WIN_LEN_MIN    = 6           # 最短窗口（12 根 = 1 小時）
-WIN_LEN_MAX    = 864          # 最長窗口（576 根 = 2 天）
+INPUT_FILE     = "Data/btc_5m_no_outliers.csv"
+OUTPUT_FILE    = "Data/btc_5m_rocket_features.parquet"
+WIN_LEN_MIN    = 6           # 最短窗口
+WIN_LEN_MAX    = 864          # 最長窗口
 N_KERNELS      = 4096        # kernel 數量
 CHANNELS       = ["open", "high", "low", "close", "volume"]
 SEED           = 42
@@ -124,26 +132,31 @@ def apply_rocket(X_gpu: cp.ndarray, kernels: list) -> np.ndarray:
     features_gpu = cp.zeros((N, 2 * n_k), dtype=cp.float32)
 
     t0 = time.perf_counter()
-    print(f"  [GPU] 套用 {n_k} 個 kernel 到 {N} 個樣本（{C} 通道 × {T} 時步）...")
+    console.print(f"  [bold green][GPU][/] 套用 {n_k} 個 kernel 到 {N} 個樣本（{C} 通道 × {T} 時步）...")
 
-    for ki, kernel in enumerate(kernels):
-        k_win = kernel["win_len"]
-        ch    = kernel["channel"]
-        # 取各樣本窗口的最後 k_win 根
-        x_ch = X_gpu[:, ch, T - k_win:]
-        mx, ppv = _apply_kernel_batch_gpu(x_ch, kernel)
-        features_gpu[:, 2 * ki]     = mx
-        features_gpu[:, 2 * ki + 1] = ppv
+    with Progress(
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("Kernels", total=n_k)
+        for ki, kernel in enumerate(kernels):
+            k_win = kernel["win_len"]
+            ch    = kernel["channel"]
+            x_ch = X_gpu[:, ch, T - k_win:]
+            mx, ppv = _apply_kernel_batch_gpu(x_ch, kernel)
+            features_gpu[:, 2 * ki]     = mx
+            features_gpu[:, 2 * ki + 1] = ppv
+            progress.advance(task)
 
-        if (ki + 1) % 200 == 0:
-            cp.cuda.Stream.null.synchronize()
-            elapsed = time.perf_counter() - t0
-            eta = elapsed / (ki + 1) * (n_k - ki - 1)
-            print(f"    {ki+1}/{n_k}  耗時 {elapsed:.1f}s  剩餘約 {eta:.0f}s   ",
-                  end="\r")
+            if (ki + 1) % 200 == 0:
+                cp.cuda.Stream.null.synchronize()
 
     cp.cuda.Stream.null.synchronize()
-    print(f"\n  [GPU] 完成，共耗時 {time.perf_counter()-t0:.1f} 秒")
+    console.print(f"  [bold green]✓[/] [GPU] 完成，共耗時 [bold]{time.perf_counter()-t0:.1f}[/] 秒")
 
     # 搬回 CPU
     return cp.asnumpy(features_gpu)
@@ -161,39 +174,58 @@ def build_rocket_features(
     seed        : int  = SEED,
 ) -> pd.DataFrame:
 
+    console.rule("[bold magenta]ROCKET 特徵工程[/]")
+
     rng = np.random.default_rng(seed)
-    df  = pd.read_csv(input_file, parse_dates=["open_time"])
-    df[channels] = df[channels].astype(float)
+    with console.status("[bold green]載入資料中..."):
+        df  = pd.read_csv(input_file, parse_dates=["open_time"])
+        df[channels] = df[channels].astype(float)
     n_ch = len(channels)
-    print(f"載入資料：{len(df)} 筆，通道：{channels}")
+    console.print(f"  ✓ 載入資料：[bold]{len(df):,}[/] 筆，通道：{channels}")
 
     # ── Step 1：先產生 kernels（需要最大窗口長度）───────────────────────────
-    print(f"產生 {n_kernels} 個隨機 kernel（窗口 {win_len_min}～{win_len_max}）...")
+    console.print(f"  產生 [bold]{n_kernels}[/] 個隨機 kernel（窗口 {win_len_min}～{win_len_max}）...")
     kernels = _generate_kernels(n_kernels, win_len_min, win_len_max, n_ch, rng)
     max_win = max(k["win_len"] for k in kernels)
     min_win = min(k["win_len"] for k in kernels)
     avg_win = int(np.mean([k["win_len"] for k in kernels]))
-    print(f"  窗口長度分佈：min={min_win}  avg={avg_win}  max={max_win}")
+
+    kern_table = Table(title="Kernel 窗口分佈", box=box.SIMPLE_HEAD)
+    kern_table.add_column("統計", style="bold")
+    kern_table.add_column("數值", justify="right")
+    kern_table.add_row("最短窗口", str(min_win))
+    kern_table.add_row("平均窗口", str(avg_win))
+    kern_table.add_row("最長窗口", str(max_win))
+    console.print(kern_table)
 
     # ── Step 2：以最大窗口建立滑動窗口 ────────────────────────────────────────
     total     = len(df)
     n_samples = total - max_win - 1      # 預留 2 根給 label_2
-    print(f"樣本數：{n_samples}（最大窗口={max_win}，每步滑動 1 根）")
+    console.print(f"  樣本數：[bold]{n_samples:,}[/]（最大窗口={max_win}，每步滑動 1 根）")
 
     # 在 GPU 上建立所有窗口並做 z-score 標準化
     raw = cp.asarray(df[channels].values, dtype=cp.float32)  # (total, n_ch) → GPU
-    print("  建立滑動窗口並搬上 GPU...")
+
     t0 = time.perf_counter()
-
     X_gpu = cp.zeros((n_samples, n_ch, max_win), dtype=cp.float32)
-    for i in range(n_samples):
-        window = raw[i: i + max_win].T  # (C, max_win)
-        mu  = window.mean(axis=1, keepdims=True)
-        std = window.std(axis=1, keepdims=True) + 1e-8
-        X_gpu[i] = (window - mu) / std
+    with Progress(
+        TextColumn("[bold blue]{task.description}"),
+        BarColumn(bar_width=40),
+        MofNCompleteColumn(),
+        TextColumn("•"),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        task = progress.add_task("建立滑動窗口", total=n_samples)
+        for i in range(n_samples):
+            window = raw[i: i + max_win].T  # (C, max_win)
+            mu  = window.mean(axis=1, keepdims=True)
+            std = window.std(axis=1, keepdims=True) + 1e-8
+            X_gpu[i] = (window - mu) / std
+            progress.advance(task)
 
-    print(f"  窗口建立完成，耗時 {time.perf_counter()-t0:.1f}s  "
-          f"GPU 記憶體: {X_gpu.nbytes / 1e9:.2f} GB")
+    console.print(f"  ✓ 窗口建立完成，耗時 [bold]{time.perf_counter()-t0:.1f}s[/]  "
+                  f"GPU 記憶體: [bold]{X_gpu.nbytes / 1e9:.2f}[/] GB")
 
     # 標籤 label  ：下 1 根 close > 當前 close → 1
     # 標籤 label_2：下 2 根 close > 當前 close → 1
@@ -211,44 +243,51 @@ def build_rocket_features(
     feat_matrix = apply_rocket(X_gpu, kernels)
 
     # 釋放 GPU 記憶體
-    print("  釋放 GPU 記憶體...")
+    console.print("  釋放 GPU 記憶體...")
     del X_gpu
     cp.get_default_memory_pool().free_all_blocks()
+    console.print("  ✓ GPU 記憶體已釋放")
 
     # ── Step 4：組合輸出 DataFrame ────────────────────────────────────────────
-    print(f"  建立 DataFrame（{n_samples} × {2*n_kernels}）...")
-    t0 = time.perf_counter()
-    col_names = []
-    for ki in range(n_kernels):
-        col_names += [f"rocket_{ki}_max", f"rocket_{ki}_ppv"]
+    with console.status(f"[bold green]建立 DataFrame（{n_samples:,} × {2*n_kernels:,}）..."):
+        t0 = time.perf_counter()
+        col_names = []
+        for ki in range(n_kernels):
+            col_names += [f"rocket_{ki}_max", f"rocket_{ki}_ppv"]
 
-    feat_df = pd.DataFrame(feat_matrix, columns=col_names)
+        feat_df = pd.DataFrame(feat_matrix, columns=col_names)
 
-    # 附上時間戳（對應窗口最後一根的 open_time）與標籤
-    feat_df.insert(0, "open_time",
-                   df["open_time"].iloc[max_win - 1 : max_win - 1 + n_samples].values)
-    feat_df["label"]   = labels
-    feat_df["label_2"] = labels_2
-    print(f"  DataFrame 建立完成，耗時 {time.perf_counter()-t0:.1f}s")
+        # 附上時間戳（對應窗口最後一根的 open_time）與標籤
+        feat_df.insert(0, "open_time",
+                       df["open_time"].iloc[max_win - 1 : max_win - 1 + n_samples].values)
+        feat_df["label"]   = labels
+        feat_df["label_2"] = labels_2
+    console.print(f"  ✓ DataFrame 建立完成，耗時 [bold]{time.perf_counter()-t0:.1f}s[/]")
 
     # 儲存為 Parquet（比 CSV 快 10 倍以上、檔案小 5 倍以上）
-    print(f"  儲存至 {output_file}...")
-    t0 = time.perf_counter()
-    if output_file.endswith(".parquet"):
-        feat_df.to_parquet(output_file, index=False, engine="pyarrow")
-    else:
-        feat_df.to_csv(output_file, index=False)
-    save_time = time.perf_counter() - t0
+    with console.status(f"[bold green]儲存至 {output_file}..."):
+        t0 = time.perf_counter()
+        if output_file.endswith(".parquet"):
+            feat_df.to_parquet(output_file, index=False, engine="pyarrow")
+        else:
+            feat_df.to_csv(output_file, index=False)
+        save_time = time.perf_counter() - t0
 
     pos1 = labels.mean() * 100
     pos2 = labels_2.mean() * 100
-    print(f"\n完成！")
-    print(f"  特徵維度 : {feat_df.shape[1] - 3} 維（{n_kernels} kernels × 2）")
-    print(f"  樣本數   : {len(feat_df)}")
-    print(f"  label   漲比例 : {pos1:.2f}%")
-    print(f"  label_2 漲比例 : {pos2:.2f}%")
-    print(f"  儲存耗時 : {save_time:.1f}s")
-    print(f"  已儲存至 : {output_file}")
+
+    # 最終摘要表
+    summary_table = Table(title="ROCKET 特徵工程完成", box=box.DOUBLE_EDGE, show_lines=True)
+    summary_table.add_column("項目", style="bold")
+    summary_table.add_column("數值", justify="right")
+    summary_table.add_row("特徵維度", f"{feat_df.shape[1] - 3:,} 維（{n_kernels:,} kernels × 2）")
+    summary_table.add_row("樣本數", f"{len(feat_df):,}")
+    summary_table.add_row("label 漲比例", f"{pos1:.2f}%")
+    summary_table.add_row("label_2 漲比例", f"{pos2:.2f}%")
+    summary_table.add_row("儲存耗時", f"{save_time:.1f}s")
+    summary_table.add_row("輸出檔案", output_file)
+    console.print(summary_table)
+
     return feat_df
 
 

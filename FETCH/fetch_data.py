@@ -101,7 +101,7 @@ def load_from_sqlite(db_path: str, table_name: str = "btc_5m",
 
 
 if __name__ == "__main__":
-    DB_FILE = "btc_data.db"
+    DB_FILE = "Data/btc_data.db"
     target_count = 100000
 
     df = fetch_5m_btcusdt_latest_n(total_limit=target_count)

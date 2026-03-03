@@ -1,6 +1,29 @@
 # BTC 5 分鐘 K 線預測 Pipeline
 
 > 從 Binance API 抓取 BTCUSDT 5m K 線 → 清理 → 異常值處理 → ROCKET 特徵工程（GPU）→ RandomForest 篩選 → RBF SVM 分類 → 信心過濾
+>
+> 全流程使用 **Rich** 美化終端輸出（進度條、表格、旋轉動畫）
+
+---
+
+## 專案結構
+
+```
+CODE/
+├── Fetch/
+│   └── fetch_data.py              # ① 資料抓取（Binance API → CSV + SQLite）
+├── Data/
+│   ├── btc_5m.csv                 # 原始 K 線
+│   ├── btc_data.db                # SQLite 持久化
+│   ├── btc_5m_clean.csv           # 清理後
+│   ├── btc_5m_no_outliers.csv     # Winsorize 後
+│   └── btc_5m_rocket_features.parquet  # ROCKET 特徵
+├── btc_data_pipeline.py           # ② 資料清理 + 異常值處理
+├── rocket_features.py             # ③ ROCKET 特徵工程（GPU）
+├── svm_classify.py                # ④ RF 篩選 + SVM 分類
+├── requirements.txt
+└── README.md
+```
 
 ---
 
@@ -8,7 +31,7 @@
 
 ```mermaid
 flowchart TD
-    subgraph S1["① fetch_data.py"]
+    subgraph S1["① Fetch/fetch_data.py"]
         A1[/"Binance API\n/api/v3/klines"/]
         A2["抓取 100,000 根\nBTCUSDT 5m K 線"]
         A1 --> A2
@@ -39,12 +62,12 @@ flowchart TD
         D1 --> D2 --> D3 --> D4 --> D5
     end
 
-    F1[("btc_5m.csv\n401,000 筆")]
-    F2[("btc_data.db\nSQLite")]
-    F3[("btc_5m_clean.csv\n100,074 筆")]
-    F4[("btc_5m_no_outliers.csv\n100,074 筆")]
-    F5[("btc_5m_rocket_features.parquet\n99,213 筆 × 8,192 維")]
-    F6["📊 分類報表\nACC · F1 · 信心分析"]
+    F1[("Data/btc_5m.csv\n401,000 筆")]
+    F2[("Data/btc_data.db\nSQLite")]
+    F3[("Data/btc_5m_clean.csv\n100,074 筆")]
+    F4[("Data/btc_5m_no_outliers.csv\n100,074 筆")]
+    F5[("Data/btc_5m_rocket_features.parquet\n99,213 筆 × 8,192 維")]
+    F6["📊 Rich 分類報表\nACC · F1 · 信心分析"]
 
     S1 --> F1
     S1 --> F2
@@ -91,23 +114,23 @@ flowchart LR
 ### 執行順序
 
 ```bash
-python fetch_data.py              # ① 抓取原始資料（只需執行一次）
-python btc_data_pipeline.py       # ② 清理 + Winsorize
-python rocket_features.py        # ③ ROCKET 特徵萃取（需要 GPU + CuPy）
-python svm_classify.py            # ④ 訓練 + 評估 + 信心過濾
+python Fetch/fetch_data.py         # ① 抓取原始資料（只需執行一次）
+python btc_data_pipeline.py        # ② 清理 + Winsorize
+python rocket_features.py          # ③ ROCKET 特徵萃取（需要 GPU + CuPy）
+python svm_classify.py             # ④ 訓練 + 評估 + 信心過濾
 ```
 
 ---
 
 ## 各檔案功能說明
 
-### 1. `fetch_data.py` — 資料抓取
+### 1. `Fetch/fetch_data.py` — 資料抓取
 
 | 項目 | 說明 |
 |------|------|
 | **用途** | 從 Binance REST API 抓取 BTCUSDT 5 分鐘 K 線歷史資料 |
 | **輸入** | Binance `/api/v3/klines` 端點 |
-| **輸出** | `btc_5m.csv`（CSV 匯出）、`btc_data.db`（SQLite 持久化） |
+| **輸出** | `Data/btc_5m.csv`（CSV 匯出）、`Data/btc_data.db`（SQLite 持久化） |
 | **抓取量** | 預設 100,000 根 K 棒（約 347 天） |
 
 **核心函式：**
@@ -124,10 +147,11 @@ python svm_classify.py            # ④ 訓練 + 評估 + 信心過濾
 
 | 項目 | 說明 |
 |------|------|
-| **用途** | 整合 `clean_data.py` 與 `remove_outliers.py` 的功能 |
-| **輸入** | `btc_5m.csv` |
-| **輸出** | `btc_5m_clean.csv` → `btc_5m_no_outliers.csv` |
+| **用途** | 整合清理與 Winsorize 的功能 |
+| **輸入** | `Data/btc_5m.csv` |
+| **輸出** | `Data/btc_5m_clean.csv` → `Data/btc_5m_no_outliers.csv` |
 | **類別** | `BTCDataCleaner` |
+| **Rich 輸出** | `console.status()` 載入動畫、Winsorize 調整結果 `Table` |
 
 **流程：**
 
@@ -151,9 +175,10 @@ python svm_classify.py            # ④ 訓練 + 評估 + 信心過濾
 | 項目 | 說明 |
 |------|------|
 | **用途** | 以隨機卷積核（ROCKET）萃取時序特徵 |
-| **輸入** | `btc_5m_no_outliers.csv` |
-| **輸出** | `btc_5m_rocket_features.parquet` |
+| **輸入** | `Data/btc_5m_no_outliers.csv` |
+| **輸出** | `Data/btc_5m_rocket_features.parquet` |
 | **硬體需求** | NVIDIA GPU + CuPy |
+| **Rich 輸出** | `Progress` 進度條（滑動窗口建立 + Kernel 套用）、Kernel 分佈 `Table`、完成摘要 `Table` |
 
 **關鍵參數：**
 
@@ -182,8 +207,9 @@ python svm_classify.py            # ④ 訓練 + 評估 + 信心過濾
 | 項目 | 說明 |
 |------|------|
 | **用途** | RandomForest 特徵篩選 → Nystroem RBF 近似 → LinearSVC 分類 |
-| **輸入** | `btc_5m_rocket_features.parquet` |
-| **輸出** | 終端報表（Accuracy / Precision / Recall / F1 / Confusion Matrix） |
+| **輸入** | `Data/btc_5m_rocket_features.parquet` |
+| **輸出** | Rich 終端報表（Accuracy / Precision / Recall / F1 / Confusion Matrix） |
+| **Rich 輸出** | `console.status()` 訓練動畫、資料概覽 / 切割 / RF 篩選 / 模型指標 / 混淆矩陣 / 信心門檻 / 摘要比較 `Table`、Classification Report `Panel` |
 
 **關鍵參數：**
 
@@ -204,45 +230,17 @@ python svm_classify.py            # ④ 訓練 + 評估 + 信心過濾
 5. `LinearSVC` 訓練與預測
 6. **信心過濾**：依 `decision_function` 距離超平面的距離，在不同門檻下顯示精確率 vs 覆蓋率
 
-**最近結果（螢本數  99,213）：**
-
-| 指標 | label (1根) | label_2 (2根) |
-|------|:-----------:|:-------------:|
-| Train 筆數 | 79,370 | 79,370 |
-| Test 筆數 | 19,843 | 19,843 |
-| Train ACC | 55.1% | 56.0% |
-| Test ACC | 52.1% | 52.5% |
-| Test F1 | 52.3% | 52.5% |
-
-**信心過濾效果：**
-
-| 門檻 | 覆蓋率 | label ACC | label Prec(漲) | label₂ ACC | label₂ Prec(漲) |
-|------|--------|-----------|---------------|------------|----------------|
-| 0.10 | ~14% | 64.5% | 62.8% | 59.7% | 56.0% |
-| 0.20 | ~5% | 82.3% | 97.8% | 82.2% | 94.1% |
-| 0.30 | ~4% | **87.9%** | **100%** | **88.8%** | **100%** |
-| 0.50 | ~3% | 86.6% | 100% | 88.9% | 100% |
-
----
-
-### 5. 舊檔案（已被 `btc_data_pipeline.py` 取代）
-
-| 檔案 | 狀態 | 說明 |
-|------|------|------|
-| `clean_data.py` | 可刪除 | 功能已合併至 `btc_data_pipeline.py` |
-| `remove_outliers.py` | 可刪除 | 功能已合併至 `btc_data_pipeline.py` |
-
 ---
 
 ## 中間檔案一覽
 
 | 檔案 | 大小（約） | 列數 | 產生者 |
 |------|-----------|------|--------|
-| `btc_5m.csv` | ~50 MB | 401,000 | `fetch_data.py` |
-| `btc_data.db` | ~55 MB | 100,000 | `fetch_data.py` |
-| `btc_5m_clean.csv` | ~8 MB | 100,074 | `btc_data_pipeline.py` |
-| `btc_5m_no_outliers.csv` | ~8 MB | 100,074 | `btc_data_pipeline.py` |
-| `btc_5m_rocket_features.parquet` | ~500 MB | 99,213 | `rocket_features.py` |
+| `Data/btc_5m.csv` | ~50 MB | 401,000 | `Fetch/fetch_data.py` |
+| `Data/btc_data.db` | ~55 MB | 100,000 | `Fetch/fetch_data.py` |
+| `Data/btc_5m_clean.csv` | ~8 MB | 100,074 | `btc_data_pipeline.py` |
+| `Data/btc_5m_no_outliers.csv` | ~8 MB | 100,074 | `btc_data_pipeline.py` |
+| `Data/btc_5m_rocket_features.parquet` | ~500 MB | 99,213 | `rocket_features.py` |
 
 ---
 
@@ -299,6 +297,8 @@ Python 3.11
 numpy, pandas, scikit-learn
 cupy (需 NVIDIA GPU + CUDA)
 requests (Binance API)
+pyarrow (Parquet 讀寫)
+rich (終端美化輸出)
 ```
 
 ## 硬體

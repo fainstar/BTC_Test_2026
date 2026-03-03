@@ -17,9 +17,15 @@ from __future__ import annotations
 import pandas as pd
 from typing import Iterable, List
 
-INPUT_FILE = "btc_5m.csv"
-CLEAN_OUTPUT = "btc_5m_clean.csv"
-OUTLIER_OUTPUT = "btc_5m_no_outliers.csv"
+from rich.console import Console
+from rich.table import Table
+from rich import box
+
+console = Console()
+
+INPUT_FILE = "Data/btc_5m.csv"
+CLEAN_OUTPUT = "Data/btc_5m_clean.csv"
+OUTLIER_OUTPUT = "Data/btc_5m_no_outliers.csv"
 KEEP_COLS = ["open_time", "open", "high", "low", "close", "volume"]
 WINDOW = 2016
 K = 2.0
@@ -44,15 +50,16 @@ class BTCDataCleaner:
         self.check_cols = list(check_cols)
 
     def clean(self) -> pd.DataFrame:
-        df = pd.read_csv(self.input_file, usecols=self.keep_cols)
-        print(f"載入原始 {len(df)} 筆資料 ({self.input_file})")
+        with console.status(f"[bold green]載入 {self.input_file}..."):
+            df = pd.read_csv(self.input_file, usecols=self.keep_cols)
+        console.print(f"  ✓ 載入原始 [bold]{len(df):,}[/] 筆資料（{self.input_file}）")
         df["open_time"] = pd.to_datetime(df["open_time"])
         df = df.drop_duplicates("open_time")
         df = df.sort_values("open_time").reset_index(drop=True)
         for col in ["open", "high", "low", "close", "volume"]:
             df[col] = df[col].astype(float)
         df.to_csv(self.clean_output, index=False)
-        print(f"清理完成，已儲存 {len(df)} 筆至 {self.clean_output}")
+        console.print(f"  ✓ 清理完成，已儲存 [bold]{len(df):,}[/] 筆至 {self.clean_output}")
         return df
 
     def _rolling_iqr_clip(self, series: pd.Series) -> pd.Series:
@@ -69,17 +76,26 @@ class BTCDataCleaner:
 
     def winsorize(self, df: pd.DataFrame) -> pd.DataFrame:
         df = df.copy()
-        print(f"開始 Winsorize：window={self.window}  k={self.k}")
+        console.rule("[bold cyan]Winsorize[/]")
+        console.print(f"  參數：window=[bold]{self.window}[/]  k=[bold]{self.k}[/]")
+
+        win_table = Table(title="Winsorize 調整結果", box=box.SIMPLE_HEAD)
+        win_table.add_column("欄位", style="bold")
+        win_table.add_column("調整筆數", justify="right", style="yellow")
+
         for col in self.check_cols:
             clipped = self._rolling_iqr_clip(df[col])
             changed = (clipped != df[col]).sum()
-            print(f"  {col}: 調整 {changed} 筆超出界限的數值")
+            win_table.add_row(col, f"{changed:,}")
             df[col] = clipped
+
+        console.print(win_table)
+
         for col in ["open", "high", "low", "close", "volume"]:
             if col in df.columns:
                 df[col] = df[col].map(self._format_value)
         df.to_csv(self.outlier_output, index=False)
-        print(f"已將 Winsorized 結果儲存至 {self.outlier_output}")
+        console.print(f"  ✓ 已將 Winsorized 結果儲存至 [bold]{self.outlier_output}[/]")
         return df
 
     def run(self) -> pd.DataFrame:
@@ -88,8 +104,10 @@ class BTCDataCleaner:
 
 
 def main() -> None:
+    console.rule("[bold magenta]BTC 資料清理 Pipeline[/]")
     cleaner = BTCDataCleaner()
     cleaner.run()
+    console.print("[bold green]✓ Pipeline 完成[/]")
 
 
 if __name__ == "__main__":

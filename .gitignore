@@ -1,5 +1,5 @@
 /btc_5m.csv
-/btc_5m_clean.csv
-/btc_5m_no_outliers.csv
-/btc_5m_rocket_features.parquet
+Data/btc_5m_clean.csv
+Data/btc_5m_no_outliers.csv
+Data/btc_5m_rocket_features.parquet
 /__pycache__
