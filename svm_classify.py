@@ -20,6 +20,8 @@ from sklearn.svm import LinearSVC
 from sklearn.metrics import (accuracy_score, precision_score, recall_score,
                              f1_score, confusion_matrix, classification_report)
 import time
+from datetime import datetime
+from pathlib import Path
 
 from rich.console import Console
 from rich.table import Table
@@ -29,6 +31,7 @@ from rich import box
 console = Console()
 
 INPUT_FILE       = "Data/btc_5m_rocket_features.parquet"
+REPORT_DIR       = "Report"
 TRAIN_RATIO      = 0.8
 N_SELECT         = 1024     # RF 篩選後保留的特徵數
 NYSTROEM_N_COMP  = 4096    # Nystroem 近似維度
@@ -266,7 +269,116 @@ def run_svm(input_file: str = INPUT_FILE,
     console.print(summary_table)
 
     results["scaler"] = scaler
+
+    # ── 7. 產生 Markdown 報告 ───────────────────────────────────────────────
+    _generate_md_report(results, df, split_idx, rf_time, importances, rf, 
+                        X_train_sc, y1_train, X_test_sc, y1_test)
+
     return results
+
+
+def _generate_md_report(results: dict, df: pd.DataFrame, split_idx: int,
+                        rf_time: float, importances: np.ndarray,
+                        rf, X_train_sc, y1_train, X_test_sc, y1_test):
+    """\u7522\u751f Markdown \u5831\u544a\u4e26\u5132\u5b58\u81f3 Report/ \u8cc7\u6599\u593e\u3002"""
+    Path(REPORT_DIR).mkdir(exist_ok=True)
+    now = datetime.now()
+    filename = f"report_{now.strftime('%Y%m%d_%H%M%S')}.md"
+    filepath = Path(REPORT_DIR) / filename
+
+    lines = []
+    lines.append(f"# SVM \u5206\u985e\u5831\u544a")
+    lines.append(f"")
+    lines.append(f"> \u7522\u751f\u6642\u9593\uff1a{now.strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append(f"")
+    lines.append(f"---")
+    lines.append(f"")
+
+    # \u8cc7\u6599\u6982\u89bd
+    lines.append(f"## \u8cc7\u6599\u6982\u89bd")
+    lines.append(f"")
+    lines.append(f"| \u9805\u76ee | \u6578\u503c |")
+    lines.append(f"|------|------|")
+    lines.append(f"| \u6a23\u672c\u6578 | {len(df):,} |")
+    lines.append(f"| Train | {split_idx:,} \u7b46 |")
+    lines.append(f"| Test | {len(df) - split_idx:,} \u7b46 |")
+    lines.append(f"| Train \u6642\u9593 | {df['open_time'].iloc[0]} \uff5e {df['open_time'].iloc[split_idx-1]} |")
+    lines.append(f"| Test \u6642\u9593 | {df['open_time'].iloc[split_idx]} \uff5e {df['open_time'].iloc[-1]} |")
+    lines.append(f"")
+
+    # \u8d85\u53c3\u6578
+    lines.append(f"## \u8d85\u53c3\u6578")
+    lines.append(f"")
+    lines.append(f"| \u53c3\u6578 | \u503c |")
+    lines.append(f"|------|------|")
+    lines.append(f"| RF n_estimators | {RF_N_ESTIMATORS} |")
+    lines.append(f"| RF \u7be9\u9078\u7279\u5fb5\u6578 | {N_SELECT} |")
+    lines.append(f"| Nystroem n_components | {NYSTROEM_N_COMP} |")
+    lines.append(f"| SVM C | 0.01 |")
+    lines.append(f"| SVM class_weight | balanced |")
+    lines.append(f"| RF \u8a13\u7df4\u8017\u6642 | {rf_time:.1f}s |")
+    lines.append(f"| RF \u6700\u9ad8\u91cd\u8981\u5ea6 | {importances.max():.6f} |")
+    lines.append(f"| RF Train ACC | {accuracy_score(y1_train, rf.predict(X_train_sc)):.4f} |")
+    lines.append(f"| RF Test ACC | {accuracy_score(y1_test, rf.predict(X_test_sc)):.4f} |")
+    lines.append(f"")
+
+    # \u5404\u6a19\u7c64\u7d50\u679c
+    for label_key in ["label", "label_2"]:
+        if label_key not in results or label_key == "scaler":
+            continue
+        r = results[label_key]
+        cm = r["confusion_matrix"]
+        title = "\u4e0b 1 \u6839\u6f32\u8dcc" if label_key == "label" else "\u4e0b 2 \u6839\u6f32\u8dcc"
+
+        lines.append(f"## {label_key}\uff08{title}\uff09")
+        lines.append(f"")
+
+        # \u6307\u6a19
+        lines.append(f"### \u6a21\u578b\u6307\u6a19")
+        lines.append(f"")
+        lines.append(f"| \u6307\u6a19 | \u6578\u503c |")
+        lines.append(f"|------|------|")
+        lines.append(f"| Train Accuracy | {r['train_acc']:.4f} |")
+        lines.append(f"| **Test Accuracy** | **{r['test_acc']:.4f}** |")
+        lines.append(f"| Test Precision | {r['test_precision']:.4f} |")
+        lines.append(f"| Test Recall | {r['test_recall']:.4f} |")
+        lines.append(f"| **Test F1** | **{r['test_f1']:.4f}** |")
+        lines.append(f"")
+
+        # \u6df7\u6dc6\u77e9\u9663
+        lines.append(f"### Confusion Matrix")
+        lines.append(f"")
+        lines.append(f"| | \u9810\u6e2c\u8dcc | \u9810\u6e2c\u6f32 |")
+        lines.append(f"|------|------|------|")
+        lines.append(f"| **\u5be6\u969b\u8dcc** | {cm[0,0]} | {cm[0,1]} |")
+        lines.append(f"| **\u5be6\u969b\u6f32** | {cm[1,0]} | {cm[1,1]} |")
+        lines.append(f"")
+
+        # \u4fe1\u5fc3\u904e\u6ffe
+        if r.get("confidence"):
+            lines.append(f"### \u4fe1\u5fc3\u904e\u6ffe")
+            lines.append(f"")
+            lines.append(f"| \u9580\u6abb | \u8986\u84cb\u7387 | \u6a23\u672c\u6578 | ACC | Prec(\u6f32) | Rec(\u6f32) | F1(\u6f32) |")
+            lines.append(f"|------|------|------|------|------|------|------|")
+            for c in r["confidence"]:
+                lines.append(f"| {c['threshold']:.2f} | {c['coverage']:.1%} | {c['n_samples']} | "
+                             f"{c['acc']:.4f} | {c['precision']:.4f} | {c['recall']:.4f} | {c['f1']:.4f} |")
+            lines.append(f"")
+
+    # \u6458\u8981\u6bd4\u8f03
+    lines.append(f"## \u6458\u8981\u6bd4\u8f03")
+    lines.append(f"")
+    lines.append(f"| \u76ee\u6a19 | Train ACC | Test ACC | Test F1 |")
+    lines.append(f"|------|------|------|------|")
+    for name in ["label", "label_2"]:
+        if name in results:
+            r = results[name]
+            lines.append(f"| {name} | {r['train_acc']:.4f} | {r['test_acc']:.4f} | **{r['test_f1']:.4f}** |")
+    lines.append(f"")
+
+    md_text = "\n".join(lines)
+    filepath.write_text(md_text, encoding="utf-8")
+    console.print(f"  \u2713 \u5831\u544a\u5df2\u5132\u5b58\u81f3 [bold green]{filepath}[/]")
 
 
 if __name__ == "__main__":
