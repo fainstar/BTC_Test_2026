@@ -30,85 +30,23 @@ CODE/
 ## 資料流總覽
 
 ```mermaid
-flowchart TD
-    subgraph S1["① Fetch/fetch_data.py"]
-        A1[/"Binance API\n/api/v3/klines"/]
-        A2["抓取 100,000 根\nBTCUSDT 5m K 線"]
-        A1 --> A2
-    end
+flowchart LR
+    A[/"Binance API"/] -->|"fetch_data.py"| B[("btc_5m.csv\n401K 筆")]
+    B -->|"btc_data_pipeline.py\nclean + winsorize"| C[("no_outliers.csv\n100K 筆")]
+    C -->|"rocket_features.py\nGPU 卷積"| D[("rocket.parquet\n99K × 8192")]
+    D -->|"svm_classify.py\nRF→Nystroem→SVM"| E["📊 分類報表"]
 
-    subgraph S2["② btc_data_pipeline.py"]
-        B1["clean()\n去重 · 排序 · 保留 OHLCV"]
-        B2["winsorize()\n滾動 IQR clip\nwindow=2016 · k=2.0"]
-        B1 --> B2
-    end
-
-    subgraph S3["③ rocket_features.py — GPU"]
-        C1["_generate_kernels()\n4096 隨機卷積核\nwin 6~864 · dilation · padding"]
-        C2["滑動窗口建構\nZ-score 標準化\n上傳至 GPU"]
-        C3["_apply_kernel_batch_gpu()\nCuPy dilated conv\nmax + PPV 萃取"]
-        C4["標籤生成\nlabel: 下1根漲跌\nlabel_2: 下2根漲跌"]
-        C1 --> C3
-        C2 --> C3
-        C3 --> C4
-    end
-
-    subgraph S4["④ svm_classify.py"]
-        D1["StandardScaler\n特徵標準化"]
-        D2["RandomForest\n篩選 Top-1024 特徵\n8192 → 1024 維"]
-        D3["Nystroem RBF\n核近似映射\n1024 → 4096 維"]
-        D4["LinearSVC\nC=0.01 · balanced"]
-        D5["信心過濾\ndecision_function 門檻"]
-        D1 --> D2 --> D3 --> D4 --> D5
-    end
-
-    F1[("Data/btc_5m.csv\n401,000 筆")]
-    F2[("Data/btc_data.db\nSQLite")]
-    F3[("Data/btc_5m_clean.csv\n100,074 筆")]
-    F4[("Data/btc_5m_no_outliers.csv\n100,074 筆")]
-    F5[("Data/btc_5m_rocket_features.parquet\n99,213 筆 × 8,192 維")]
-    F6["📊 Rich 分類報表\nACC · F1 · 信心分析"]
-
-    S1 --> F1
-    S1 --> F2
-    F1 --> S2
-    B1 --> F3
-    B2 --> F4
-    F4 --> S3
-    S3 --> F5
-    F5 --> S4
-    S4 --> F6
-
-    style S1 fill:#1a1a2e,stroke:#e94560,color:#fff
-    style S2 fill:#1a1a2e,stroke:#0f3460,color:#fff
-    style S3 fill:#1a1a2e,stroke:#16c79a,color:#fff
-    style S4 fill:#1a1a2e,stroke:#f5a623,color:#fff
-    style F1 fill:#533483,stroke:#fff,color:#fff
-    style F2 fill:#533483,stroke:#fff,color:#fff
-    style F3 fill:#533483,stroke:#fff,color:#fff
-    style F4 fill:#533483,stroke:#fff,color:#fff
-    style F5 fill:#533483,stroke:#fff,color:#fff
-    style F6 fill:#e94560,stroke:#fff,color:#fff
+    style A fill:#1a1a2e,stroke:#e94560,color:#fff
+    style B fill:#533483,stroke:#fff,color:#fff
+    style C fill:#533483,stroke:#fff,color:#fff
+    style D fill:#533483,stroke:#fff,color:#fff
+    style E fill:#e94560,stroke:#fff,color:#fff
 ```
 
-### 資料維度變化
+### 維度變化
 
-```mermaid
-flowchart LR
-    A["401,000 筆\n12 欄\n原始 K 線"] -->|"去重排序"| B["100,074 筆\n6 欄\nOHLCV + time"]
-    B -->|"IQR clip"| C["100,074 筆\n6 欄\nWinsorized"]
-    C -->|"ROCKET\n滑動窗口"| D["99,213 筆\n8,192 維\n+ label × 2"]
-    D -->|"RF 篩選"| E["99,213 筆\n1,024 維"]
-    E -->|"Nystroem"| F["99,213 筆\n4,096 維"]
-    F -->|"LinearSVC"| G["漲 / 跌\n+ 信心分數"]
-
-    style A fill:#533483,stroke:#fff,color:#fff
-    style B fill:#0f3460,stroke:#fff,color:#fff
-    style C fill:#0f3460,stroke:#fff,color:#fff
-    style D fill:#16c79a,stroke:#fff,color:#fff
-    style E fill:#f5a623,stroke:#fff,color:#fff
-    style F fill:#f5a623,stroke:#fff,color:#fff
-    style G fill:#e94560,stroke:#fff,color:#fff
+```
+原始 401K×12 → 清理 100K×6 → ROCKET 99K×8192 → RF篩選 ×1024 → Nystroem ×4096 → 漲/跌 + 信心分數
 ```
 
 ### 執行順序

@@ -4,3 +4,4 @@ scikit-learn
 cupy-cuda12x
 requests
 pyarrow
+rich
